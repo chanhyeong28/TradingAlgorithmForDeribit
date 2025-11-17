@@ -206,9 +206,29 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Key files (sensitive credentials)
+/key/
+*.pem
+*.key
+key/*.txt
+key/*.pem
 
-# Key 
-/key
+# Test outputs
+*.png
+*.pdf
+simple_option_*.png
+vol_surface_*.png
+anomalous_vol_*.png
+atm_slope_*.png
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Old/refactored code
+old_version/
+refactored/
 
 # DS_store
 .DS_Store
