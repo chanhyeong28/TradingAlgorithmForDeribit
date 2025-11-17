@@ -1,0 +1,18 @@
+include README.md
+include LICENSE
+include requirements.txt
+include MANIFEST.in
+recursive-include deribit_trading_toolkit *.py
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .DS_Store
+exclude key/*
+exclude old_version/*
+exclude refactored/*
+exclude *.png
+exclude *.sql
+exclude visualize_vol_curves.py
+exclude test_*.py
+exclude example_*.py
+exclude realtime_iv.py
+

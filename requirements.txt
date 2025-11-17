@@ -1,0 +1,34 @@
+# Core dependencies
+dash>=2.17.0
+plotly>=5.23.0
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+matplotlib>=3.4.0
+
+# API and networking
+aiohttp>=3.8.0
+websockets>=10.0
+requests>=2.25.0
+
+# Cryptography
+cryptography>=3.4.0
+
+# Database
+mysql-connector-python>=8.0.0
+sqlalchemy>=1.4.0
+
+# Async support
+asyncio-mqtt>=0.11.0
+
+# Optional: Telegram notifications
+python-telegram-bot>=20.0
+
+# Optional: Advanced plotting
+seaborn>=0.11.0
+
+# Optional: Machine learning
+scikit-learn>=1.0.0
+
+# Optional: Jupyter support
+ipywidgets>=7.6.0
