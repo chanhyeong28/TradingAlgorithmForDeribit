@@ -29,7 +29,7 @@ A comprehensive Python package for implementing trading algorithms on Deribit ex
 
 ## Installation
 
-### From PyPI
+### From PyPI(On its way)
 
 ```bash
 pip install deribit-trading-toolkit
@@ -38,7 +38,7 @@ pip install deribit-trading-toolkit
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/TradingAlgorithmForDeribit.git
+git clone https://github.com/chanhyeong28/TradingAlgorithmForDeribit.git
 cd TradingAlgorithmForDeribit
 pip install -e .
 ```
