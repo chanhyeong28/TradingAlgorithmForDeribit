@@ -8,6 +8,11 @@ For advanced usage, import RealTimeIVApp directly from deribit_trading_toolkit.
 
 import asyncio
 import logging
+import os
+import sys
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from deribit_trading_toolkit import RealTimeIVApp
 

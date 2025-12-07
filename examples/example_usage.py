@@ -7,6 +7,12 @@ This script demonstrates how to use the refactored OOP trading system.
 
 import asyncio
 import logging
+import os
+import sys
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from deribit_trading_toolkit import (
     TradingApp, AppConfig, ConfigManager, DeribitClient, DeribitAuth,
     RiskReversalStrategy, RiskReversalConfig, RiskManager, RiskLimits,
@@ -26,7 +32,7 @@ async def example_basic_usage():
     try:
         # Load configuration
         config_manager = ConfigManager()
-        config = config_manager.load_config()
+        config = config_manager.get_config()
         
         # Create and run the trading application
         app = TradingApp(config)
@@ -45,8 +51,9 @@ async def example_manual_setup():
         
         # Initialize authentication
         auth = DeribitAuth(
-            client_id=config.deribit.client_id,
-            private_key_path=config.deribit.private_key_path
+            client_id=config.deribit.effective_client_id,
+            private_key_path=config.deribit.effective_private_key_path,
+            private_key=config.deribit.effective_private_key
         )
         
         # Initialize client
@@ -89,8 +96,9 @@ async def example_strategy_setup():
         
         # Initialize components
         auth = DeribitAuth(
-            client_id=config.deribit.client_id,
-            private_key_path=config.deribit.private_key_path
+            client_id=config.deribit.effective_client_id,
+            private_key_path=config.deribit.effective_private_key_path,
+            private_key=config.deribit.effective_private_key
         )
         
         async with DeribitClient(config.deribit, auth) as client:

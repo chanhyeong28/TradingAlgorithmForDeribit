@@ -10,6 +10,7 @@ import aiohttp
 import websockets
 import json
 import logging
+import os
 from typing import Dict, List, Optional, Any, Union, Callable
 from datetime import datetime, timedelta
 from dataclasses import dataclass
@@ -48,11 +49,22 @@ class DeribitAuthError(DeribitError):
 class DeribitAuth:
     """Handles Deribit authentication with session management"""
     
-    def __init__(self, client_id: str, private_key_path: str, session_name: Optional[str] = None):
+    def __init__(self, client_id: str, private_key_path: Optional[str] = None, 
+                 private_key: Optional[str] = None, session_name: Optional[str] = None):
+        """
+        Initialize Deribit authentication
+        
+        Args:
+            client_id: Deribit client ID
+            private_key_path: Path to RSA private key .pem file (optional if private_key provided)
+            private_key: Direct secret key string (optional if private_key_path provided)
+            session_name: Optional session name
+        """
         self.client_id = client_id
         self.private_key_path = private_key_path
+        self.private_key_string = private_key
         self.session_name = session_name or "default_session"
-        self.private_key = None
+        self.private_key = None  # RSA key object (for .pem files)
         self.access_token = None
         self.refresh_token = None
         self.refresh_token_expiry = None
@@ -61,12 +73,30 @@ class DeribitAuth:
         self._load_private_key()
     
     def _load_private_key(self):
-        """Load RSA private key from file"""
+        """Load RSA private key from file or use direct secret key"""
         try:
             from cryptography.hazmat.primitives import serialization
+            
+            # If direct secret key string is provided, use it
+            if self.private_key_string:
+                logger.info("Using direct secret key for authentication")
+                # Store the string for later use in authentication
+                self.private_key = self.private_key_string
+                return
+            
+            # Otherwise, load from .pem file
+            if not self.private_key_path:
+                raise DeribitAuthError("Either private_key_path or private_key must be provided")
+            
+            if not os.path.exists(self.private_key_path):
+                raise DeribitAuthError(f"Private key file not found: {self.private_key_path}")
+            
             with open(self.private_key_path, 'rb') as f:
                 self.private_key = serialization.load_pem_private_key(f.read(), password=None)
-            logger.info("Private key loaded successfully")
+            logger.info(f"Private key loaded successfully from {self.private_key_path}")
+            
+        except DeribitAuthError:
+            raise
         except Exception as e:
             logger.error(f"Failed to load private key: {e}")
             raise DeribitAuthError(f"Failed to load private key: {e}")
@@ -86,14 +116,28 @@ class DeribitAuth:
             # Prepare data to sign
             data_to_sign = bytes(f'{timestamp}\n{nonce}\n{data}', "latin-1")
             
-            # Sign the data
-            signature = self.private_key.sign(
-                data_to_sign,
-                padding.PKCS1v15(),
-                hashes.SHA256()
-            )
-            
-            encoded_signature = base64.urlsafe_b64encode(signature).decode('utf-8').rstrip('=')
+            # Check if using direct secret key (string) or RSA key (object)
+            if isinstance(self.private_key, str):
+                # Using client_secret authentication (direct key string)
+                import hmac
+                import hashlib
+                
+                # Deribit uses HMAC-SHA256 for secret key authentication
+                message = f"{timestamp}\n{nonce}\n{data}"
+                signature = hmac.new(
+                    self.private_key.encode('utf-8'),
+                    message.encode('utf-8'),
+                    hashlib.sha256
+                ).digest()
+                encoded_signature = base64.urlsafe_b64encode(signature).decode('utf-8').rstrip('=')
+            else:
+                # Using RSA key authentication (.pem file)
+                signature = self.private_key.sign(
+                    data_to_sign,
+                    padding.PKCS1v15(),
+                    hashes.SHA256()
+                )
+                encoded_signature = base64.urlsafe_b64encode(signature).decode('utf-8').rstrip('=')
             
             return {
                 'timestamp': timestamp,
@@ -105,27 +149,47 @@ class DeribitAuth:
             logger.error(f"Failed to generate signature: {e}")
             raise DeribitAuthError(f"Failed to generate signature: {e}")
     
-    async def authenticate(self, session: aiohttp.ClientSession) -> bool:
+    async def authenticate(self, session: aiohttp.ClientSession, api_url: Optional[str] = None) -> bool:
         """Authenticate with Deribit API"""
         try:
-            auth_data = self.generate_signature()
+            # Determine grant type based on key type
+            is_client_secret = isinstance(self.private_key, str)
             
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 9929,
-                "method": "public/auth",
-                "params": {
-                    "grant_type": "client_signature",
-                    "client_id": self.client_id,
-                    "timestamp": auth_data['timestamp'],
-                    "signature": auth_data['signature'],
-                    "nonce": auth_data['nonce'],
-                    "data": auth_data['data']
+            if is_client_secret:
+                # Client secret authentication (simpler format - no signature needed)
+                # For client_secret, Deribit API expects just client_id and client_secret
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 9929,
+                    "method": "public/auth",
+                    "params": {
+                        "grant_type": "client_credentials",
+                        "client_id": self.client_id,
+                        "client_secret": self.private_key_string
+                    }
                 }
-            }
+            else:
+                # Client signature authentication (RSA key)
+                auth_data = self.generate_signature()
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 9929,
+                    "method": "public/auth",
+                    "params": {
+                        "grant_type": "client_signature",
+                        "client_id": self.client_id,
+                        "timestamp": auth_data['timestamp'],
+                        "signature": auth_data['signature'],
+                        "nonce": auth_data['nonce'],
+                        "data": auth_data['data']
+                    }
+                }
+            
+            # Use provided API URL or default to mainnet
+            url = api_url or "https://www.deribit.com/api/v2"
             
             async with session.post(
-                "https://www.deribit.com/api/v2",
+                url,
                 json=payload
             ) as response:
                 result = await response.json()
@@ -148,11 +212,11 @@ class DeribitAuth:
             logger.error(f"Authentication failed: {e}")
             raise DeribitAuthError(f"Authentication failed: {e}")
     
-    async def refresh_auth(self, session: aiohttp.ClientSession) -> bool:
+    async def refresh_auth(self, session: aiohttp.ClientSession, api_url: Optional[str] = None) -> bool:
         """Refresh authentication token"""
         try:
             if not self.refresh_token:
-                return await self.authenticate(session)
+                return await self.authenticate(session, api_url)
             
             payload = {
                 "jsonrpc": "2.0",
@@ -164,15 +228,18 @@ class DeribitAuth:
                 }
             }
             
+            # Use provided API URL or default to mainnet
+            url = api_url or "https://www.deribit.com/api/v2"
+            
             async with session.post(
-                "https://www.deribit.com/api/v2",
+                url,
                 json=payload
             ) as response:
                 result = await response.json()
                 
                 if 'error' in result:
                     logger.warning("Token refresh failed, re-authenticating")
-                    return await self.authenticate(session)
+                    return await self.authenticate(session, api_url)
                 
                 auth_result = result.get('result', {})
                 self.access_token = auth_result.get('access_token')
@@ -296,6 +363,7 @@ class DeribitClient:
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self._rate_limiter = asyncio.Semaphore(config.rate_limit)
         self._message_handlers: Dict[str, Callable] = {}
+        self._listening = False
         
     async def __aenter__(self):
         """Async context manager entry"""
@@ -311,7 +379,7 @@ class DeribitClient:
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.config.timeout)
         )
-        await self.auth.authenticate(self.session)
+        await self.auth.authenticate(self.session, self.config.effective_api_url)
         logger.info("Deribit client connected successfully")
     
     async def disconnect(self):
@@ -322,42 +390,100 @@ class DeribitClient:
             await self.websocket.close()
         logger.info("Deribit client disconnected")
     
-    async def _make_request(self, method: str, endpoint: str, 
-                          params: Optional[Dict] = None,
-                          data: Optional[Dict] = None) -> Dict[str, Any]:
-        """Make authenticated HTTP request with rate limiting"""
+    async def _make_jsonrpc_request(self, method: str, params: Optional[Dict] = None, 
+                                    request_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Make JSON-RPC 2.0 request to Deribit API
+        
+        Args:
+            method: JSON-RPC method name (e.g., "public/get_instruments")
+            params: Method parameters
+            request_id: Optional request ID (auto-generated if not provided)
+            
+        Returns:
+            Result from the API response
+        """
+        if request_id is None:
+            import random
+            request_id = random.randint(1, 1000000)
+        
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params or {}
+        }
+        
         async with self._rate_limiter:
             # Check if we need to refresh auth
             if self.auth.needs_refresh():
-                await self.auth.refresh_auth(self.session)
+                await self.auth.refresh_auth(self.session, self.config.effective_api_url)
             
-            url = f"{self.config.effective_api_url}/{endpoint}"
+            url = self.config.effective_api_url
             headers = self.auth.get_headers()
             
             try:
-                async with self.session.request(
-                    method, url, params=params, json=data, headers=headers
-                ) as response:
-                    response.raise_for_status()
+                async with self.session.post(url, json=payload, headers=headers) as response:
                     result = await response.json()
                     
+                    # Check for HTTP errors
+                    if response.status != 200:
+                        error_info = result.get('error', {})
+                        error_msg = error_info.get('message', 'Unknown error')
+                        error_data = error_info.get('data', {})
+                        full_error = f"HTTP {response.status}: {error_msg}"
+                        if error_data:
+                            full_error += f" (data: {error_data})"
+                        logger.error(f"HTTP error: {full_error}")
+                        raise DeribitError(full_error, response.status)
+                    
+                    # Check for JSON-RPC errors
                     if 'error' in result:
-                        raise DeribitError(result['error'].get('message', 'Unknown error'), 
-                                         result['error'].get('code'))
+                        error_info = result['error']
+                        error_msg = error_info.get('message', 'Unknown error')
+                        error_code = error_info.get('code')
+                        error_data = error_info.get('data', {})
+                        logger.error(f"Deribit API error: {error_code} - {error_msg} (data: {error_data})")
+                        raise DeribitError(error_msg, error_code)
                     
                     return result.get('result', {})
                     
+            except DeribitError:
+                raise
             except aiohttp.ClientError as e:
-                logger.error(f"HTTP request failed: {e}")
+                logger.error(f"JSON-RPC request failed: {e}")
                 raise DeribitConnectionError(f"Request failed: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error in JSON-RPC request: {e}")
+                raise DeribitError(f"Unexpected error: {e}")
+    
+    async def _make_request(self, method: str, endpoint: str, 
+                          params: Optional[Dict] = None,
+                          data: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        Make authenticated HTTP request with rate limiting (legacy method)
+        
+        Note: Deribit API v2 uses JSON-RPC format. This method converts REST-style
+        calls to JSON-RPC format for backward compatibility.
+        """
+        # Convert REST-style endpoint to JSON-RPC method
+        jsonrpc_method = endpoint.replace("/", "/")
+        if not jsonrpc_method.startswith("public/") and not jsonrpc_method.startswith("private/"):
+            # Assume it's a public method if not specified
+            jsonrpc_method = f"public/{jsonrpc_method}"
+        
+        # Use params if provided, otherwise use data
+        request_params = params if params else (data if data else {})
+        
+        return await self._make_jsonrpc_request(jsonrpc_method, request_params)
     
     # Market Data Methods
     async def get_instruments(self, currency: str = "BTC", 
                            kind: str = "option") -> List[Dict]:
         """Get available instruments"""
-        return await self._make_request(
-            "GET", "public/get_instruments",
-            params={"currency": currency, "kind": kind}
+        return await self._make_jsonrpc_request(
+            "public/get_instruments",
+            {"currency": currency, "kind": kind}
         )
     
     async def get_option_chain(self, currency: str = "BTC", 
@@ -367,25 +493,25 @@ class DeribitClient:
         if expiration_date:
             params["expiration_date"] = expiration_date
             
-        instruments = await self._make_request(
-            "GET", "public/get_instruments", params=params
+        instruments = await self._make_jsonrpc_request(
+            "public/get_instruments", params
         )
         
         return [self._parse_option_contract(instr) for instr in instruments]
     
     async def get_ticker(self, instrument_name: str) -> MarketData:
         """Get current ticker data for instrument"""
-        data = await self._make_request(
-            "GET", "public/ticker",
-            params={"instrument_name": instrument_name}
+        data = await self._make_jsonrpc_request(
+            "public/ticker",
+            {"instrument_name": instrument_name}
         )
         return self._parse_market_data(data)
     
     async def get_order_book(self, instrument_name: str, depth: int = 20) -> OrderBook:
         """Get order book for instrument"""
-        data = await self._make_request(
-            "GET", "public/get_order_book",
-            params={"instrument_name": instrument_name, "depth": depth}
+        data = await self._make_jsonrpc_request(
+            "public/get_order_book",
+            {"instrument_name": instrument_name, "depth": depth}
         )
         return self._parse_order_book(data)
     
@@ -403,8 +529,8 @@ class DeribitClient:
         if end_timestamp:
             params["end_timestamp"] = end_timestamp
             
-        return await self._make_request(
-            "GET", "public/get_historical_volatility", params=params
+        return await self._make_jsonrpc_request(
+            "public/get_historical_volatility", params
         )
     
     async def get_tradingview_chart_data(
@@ -434,52 +560,18 @@ class DeribitClient:
             - ticks: List of timestamps in milliseconds
             - status: Status string
         """
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 42,
-            "method": "public/get_tradingview_chart_data",
-            "params": {
-                "instrument_name": instrument_name,
-                "start_timestamp": str(start_timestamp),  # Convert to string
-                "end_timestamp": str(end_timestamp),  # Convert to string
-                "resolution": resolution
-            }
+        # Deribit API expects timestamps as strings
+        params = {
+            "instrument_name": instrument_name,
+            "start_timestamp": str(start_timestamp),
+            "end_timestamp": str(end_timestamp),
+            "resolution": resolution
         }
         
-        # Use POST for JSON-RPC
-        async with self._rate_limiter:
-            if self.auth.needs_refresh():
-                await self.auth.refresh_auth(self.session)
-            
-            # For JSON-RPC, use the base API URL, not the method-specific endpoint
-            url = f"{self.config.effective_api_url}"
-            headers = self.auth.get_headers()
-            
-            try:
-                async with self.session.post(url, json=payload, headers=headers) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if 'error' in result:
-                        error_info = result['error']
-                        error_msg = error_info.get('message', 'Unknown error')
-                        error_code = error_info.get('code')
-                        logger.error(f"Deribit API error: {error_code} - {error_msg}")
-                        raise DeribitError(error_msg, error_code)
-                    
-                    return result.get('result', {})
-                    
-            except aiohttp.ClientError as e:
-                logger.error(f"Failed to fetch TradingView chart data: {e}")
-                raise DeribitConnectionError(f"Request failed: {e}")
+        return await self._make_jsonrpc_request("public/get_tradingview_chart_data", params)
     
-    # Options-specific methods
-    async def get_option_greeks(self, instrument_name: str) -> Dict:
-        """Get Greeks for specific option"""
-        return await self._make_request(
-            "GET", "public/get_option_greeks",
-            params={"instrument_name": instrument_name}
-        )
+    # Note: get_option_greeks method doesn't exist in Deribit API v2
+    # Greeks are included in ticker data (get_ticker method)
     
     async def get_implied_volatility(self, instrument_name: str) -> float:
         """Get implied volatility for option"""
@@ -489,49 +581,74 @@ class DeribitClient:
     # Portfolio methods (require authentication)
     async def get_positions(self, currency: str = "BTC") -> List[Dict]:
         """Get current positions"""
-        return await self._make_request(
-            "GET", "private/get_positions",
-            params={"currency": currency}
+        return await self._make_jsonrpc_request(
+            "private/get_positions",
+            {"currency": currency}
         )
     
     async def get_account_summary(self, currency: str = "BTC") -> Dict:
         """Get account summary"""
-        return await self._make_request(
-            "GET", "private/get_account_summary",
-            params={"currency": currency}
+        return await self._make_jsonrpc_request(
+            "private/get_account_summary",
+            {"currency": currency}
         )
     
     async def place_order(self, instrument_name: str, amount: float,
                         order_type: OrderType = OrderType.MARKET, 
                         price: Optional[float] = None,
-                        side: OrderSide = OrderSide.BUY) -> Dict:
-        """Place order"""
+                        side: OrderSide = OrderSide.BUY,
+                        time_in_force: Optional[str] = "good_til_cancelled") -> Dict:
+        """
+        Place order
+        
+        Args:
+            instrument_name: Instrument to trade
+            amount: Order amount (in quote currency USD for perpetuals/futures, 
+                    in base currency for options/spot)
+            order_type: Order type (MARKET or LIMIT)
+            price: Price for limit orders (required for LIMIT orders)
+            side: Order side (BUY or SELL)
+            time_in_force: Time in force (default: "good_til_cancelled")
+            
+        Returns:
+            Order result dictionary with 'order' and 'trades' keys
+        """
         params = {
             "instrument_name": instrument_name,
             "amount": amount,
-            "type": order_type.value,
-            "side": side.value
+            "type": order_type.value
         }
-        if price:
+        
+        # Price is required for limit orders
+        if order_type == OrderType.LIMIT:
+            if price is None:
+                raise ValueError("Price is required for limit orders")
             params["price"] = price
-            
-        return await self._make_request(
-            "POST", f"private/{side.value}", data=params
-        )
+        
+        # Add time_in_force if provided
+        if time_in_force:
+            params["time_in_force"] = time_in_force
+        
+        # Use buy or sell method based on side
+        method = "private/buy" if side == OrderSide.BUY else "private/sell"
+        result = await self._make_jsonrpc_request(method, params)
+        
+        # Result should already have 'order' and 'trades' structure
+        return result
     
     async def cancel_order(self, order_id: str) -> Dict:
         """Cancel order"""
-        return await self._make_request(
-            "POST", "private/cancel",
-            data={"order_id": order_id}
+        return await self._make_jsonrpc_request(
+            "private/cancel",
+            {"order_id": order_id}
         )
     
     async def simulate_portfolio(self, positions: Dict[str, float], 
                                currency: str = "BTC") -> Dict:
         """Simulate portfolio with given positions"""
-        return await self._make_request(
-            "POST", "private/simulate_portfolio",
-            data={
+        return await self._make_jsonrpc_request(
+            "private/simulate_portfolio",
+            {
                 "currency": currency,
                 "add_positions": "false",
                 "simulated_positions": positions
@@ -556,6 +673,566 @@ class DeribitClient:
     def get_auth_info(self) -> Dict[str, Any]:
         """Get current authentication information"""
         return self.auth.get_session_info()
+    
+    # Additional Public API Methods
+    async def get_currencies(self) -> List[Dict]:
+        """Get list of all supported currencies"""
+        return await self._make_jsonrpc_request("public/get_currencies")
+    
+    async def get_book_summary_by_currency(self, currency: str = "BTC", 
+                                          kind: Optional[str] = None) -> List[Dict]:
+        """Get book summary by currency"""
+        params = {"currency": currency}
+        if kind:
+            params["kind"] = kind
+        return await self._make_jsonrpc_request("public/get_book_summary_by_currency", params)
+    
+    async def get_book_summary_by_instrument(self, instrument_name: str) -> Dict:
+        """Get book summary by instrument"""
+        return await self._make_jsonrpc_request(
+            "public/get_book_summary_by_instrument",
+            {"instrument_name": instrument_name}
+        )
+    
+    async def get_index_price(self, index_name: str) -> Dict:
+        """Get index price"""
+        return await self._make_jsonrpc_request(
+            "public/get_index_price",
+            {"index_name": index_name}
+        )
+    
+    async def get_index_price_names(self, extended: bool = False) -> List[str]:
+        """Get available index price names"""
+        return await self._make_jsonrpc_request(
+            "public/get_index_price_names",
+            {"extended": extended}
+        )
+    
+    async def get_delivery_prices(self, index_name: str, offset: Optional[int] = None,
+                                 count: Optional[int] = None) -> Dict:
+        """Get delivery prices"""
+        params = {"index_name": index_name}
+        if offset is not None:
+            params["offset"] = offset
+        if count is not None:
+            params["count"] = count
+        return await self._make_jsonrpc_request("public/get_delivery_prices", params)
+    
+    async def get_last_trades_by_currency(self, currency: str = "BTC",
+                                         kind: Optional[str] = None,
+                                         start_id: Optional[str] = None,
+                                         end_id: Optional[str] = None,
+                                         count: Optional[int] = None,
+                                         include_old: Optional[bool] = None,
+                                         sorting: Optional[str] = None) -> Dict:
+        """Get last trades by currency"""
+        params = {"currency": currency}
+        if kind:
+            params["kind"] = kind
+        if start_id:
+            params["start_id"] = start_id
+        if end_id:
+            params["end_id"] = end_id
+        if count is not None:
+            params["count"] = count
+        if include_old is not None:
+            params["include_old"] = include_old
+        if sorting:
+            params["sorting"] = sorting
+        return await self._make_jsonrpc_request("public/get_last_trades_by_currency", params)
+    
+    async def get_last_trades_by_currency_and_time(self, currency: str,
+                                                   kind: Optional[str] = None,
+                                                   start_timestamp: Optional[int] = None,
+                                                   end_timestamp: Optional[int] = None,
+                                                   count: Optional[int] = None,
+                                                   include_old: Optional[bool] = None,
+                                                   sorting: Optional[str] = None) -> Dict:
+        """Get last trades by currency and time range"""
+        params = {"currency": currency}
+        if kind:
+            params["kind"] = kind
+        if start_timestamp is not None:
+            params["start_timestamp"] = str(start_timestamp)
+        if end_timestamp is not None:
+            params["end_timestamp"] = str(end_timestamp)
+        if count is not None:
+            params["count"] = count
+        if include_old is not None:
+            params["include_old"] = include_old
+        if sorting:
+            params["sorting"] = sorting
+        return await self._make_jsonrpc_request("public/get_last_trades_by_currency_and_time", params)
+    
+    async def get_last_trades_by_instrument(self, instrument_name: str,
+                                          start_seq: Optional[int] = None,
+                                          end_seq: Optional[int] = None,
+                                          count: Optional[int] = None,
+                                          include_old: Optional[bool] = None,
+                                          sorting: Optional[str] = None) -> Dict:
+        """Get last trades by instrument"""
+        params = {"instrument_name": instrument_name}
+        if start_seq is not None:
+            params["start_seq"] = start_seq
+        if end_seq is not None:
+            params["end_seq"] = end_seq
+        if count is not None:
+            params["count"] = count
+        if include_old is not None:
+            params["include_old"] = include_old
+        if sorting:
+            params["sorting"] = sorting
+        return await self._make_jsonrpc_request("public/get_last_trades_by_instrument", params)
+    
+    async def get_last_trades_by_instrument_and_time(self, instrument_name: str,
+                                                     start_timestamp: Optional[int] = None,
+                                                     end_timestamp: Optional[int] = None,
+                                                     count: Optional[int] = None,
+                                                     include_old: Optional[bool] = None,
+                                                     sorting: Optional[str] = None) -> Dict:
+        """Get last trades by instrument and time range"""
+        params = {"instrument_name": instrument_name}
+        if start_timestamp is not None:
+            params["start_timestamp"] = str(start_timestamp)
+        if end_timestamp is not None:
+            params["end_timestamp"] = str(end_timestamp)
+        if count is not None:
+            params["count"] = count
+        if include_old is not None:
+            params["include_old"] = include_old
+        if sorting:
+            params["sorting"] = sorting
+        return await self._make_jsonrpc_request("public/get_last_trades_by_instrument_and_time", params)
+    
+    # Note: get_index method doesn't exist in Deribit API v2
+    # Use get_index_price instead with index_name parameter
+    
+    async def get_volatility_index_data(self, currency: str = "BTC",
+                                       start_timestamp: Optional[int] = None,
+                                       end_timestamp: Optional[int] = None,
+                                       resolution: Optional[int] = None) -> Dict:
+        """Get volatility index data"""
+        params = {"currency": currency}
+        if start_timestamp is not None:
+            params["start_timestamp"] = str(start_timestamp)
+        if end_timestamp is not None:
+            params["end_timestamp"] = str(end_timestamp)
+        if resolution is not None:
+            params["resolution"] = resolution
+        return await self._make_jsonrpc_request("public/get_volatility_index_data", params)
+    
+    # Note: get_public_trades method doesn't exist in Deribit API v2
+    # Use get_last_trades_by_instrument instead
+    
+    # Note: get_public_trading_statistics method doesn't exist in Deribit API v2
+    # Statistics are available in ticker data
+    
+    async def get_funding_rate_history(self, instrument_name: str,
+                                     start_timestamp: Optional[int] = None,
+                                     end_timestamp: Optional[int] = None) -> List[Dict]:
+        """Get funding rate history"""
+        params = {"instrument_name": instrument_name}
+        if start_timestamp is not None:
+            params["start_timestamp"] = str(start_timestamp)
+        if end_timestamp is not None:
+            params["end_timestamp"] = str(end_timestamp)
+        return await self._make_jsonrpc_request("public/get_funding_rate_history", params)
+    
+    async def get_funding_chart_data(self, instrument_name: str, length: str = "24h") -> Dict:
+        """Get funding chart data"""
+        return await self._make_jsonrpc_request(
+            "public/get_funding_chart_data",
+            {"instrument_name": instrument_name, "length": length}
+        )
+    
+    async def get_apr_history(self, currency: str) -> Dict:
+        """Get APR (Annual Percentage Rate) history"""
+        return await self._make_jsonrpc_request(
+            "public/get_apr_history",
+            {"currency": currency.lower()}
+        )
+    
+    async def get_block_rfq_trades(self, currency: str) -> List[Dict]:
+        """Get block RFQ trades"""
+        return await self._make_jsonrpc_request(
+            "public/get_block_rfq_trades",
+            {"currency": currency}
+        )
+    
+    async def get_funding_rate_value(self, instrument_name: str,
+                                   start_timestamp: Optional[int] = None,
+                                   end_timestamp: Optional[int] = None) -> Dict:
+        """Get funding rate value for instrument"""
+        params = {"instrument_name": instrument_name}
+        if start_timestamp is not None:
+            params["start_timestamp"] = str(start_timestamp)
+        if end_timestamp is not None:
+            params["end_timestamp"] = str(end_timestamp)
+        return await self._make_jsonrpc_request("public/get_funding_rate_value", params)
+    
+    # Note: get_historical_funding_rates method doesn't exist in Deribit API v2
+    # Use get_funding_rate_history for a specific instrument instead
+    
+    # Additional Private API Methods
+    async def get_position(self, instrument_name: str) -> Dict:
+        """Get single position by instrument"""
+        return await self._make_jsonrpc_request(
+            "private/get_position",
+            {"instrument_name": instrument_name}
+        )
+    
+    async def get_open_orders_by_currency(self, currency: str = "BTC",
+                                         kind: Optional[str] = None,
+                                         type: Optional[str] = None) -> List[Dict]:
+        """Get open orders by currency"""
+        params = {"currency": currency}
+        if kind:
+            params["kind"] = kind
+        if type:
+            params["type"] = type
+        return await self._make_jsonrpc_request("private/get_open_orders_by_currency", params)
+    
+    async def get_open_orders_by_instrument(self, instrument_name: str,
+                                           type: Optional[str] = None) -> List[Dict]:
+        """Get open orders by instrument"""
+        params = {"instrument_name": instrument_name}
+        if type:
+            params["type"] = type
+        return await self._make_jsonrpc_request("private/get_open_orders_by_instrument", params)
+    
+    async def get_order_history_by_currency(self, currency: str = "BTC",
+                                          kind: Optional[str] = None,
+                                          count: Optional[int] = None,
+                                          offset: Optional[int] = None) -> Dict:
+        """Get order history by currency"""
+        params = {"currency": currency}
+        if kind:
+            params["kind"] = kind
+        if count is not None:
+            params["count"] = count
+        if offset is not None:
+            params["offset"] = offset
+        return await self._make_jsonrpc_request("private/get_order_history_by_currency", params)
+    
+    async def get_order_history_by_instrument(self, instrument_name: str,
+                                             count: Optional[int] = None,
+                                             offset: Optional[int] = None,
+                                             include_old: Optional[bool] = None) -> Dict:
+        """Get order history by instrument"""
+        params = {"instrument_name": instrument_name}
+        if count is not None:
+            params["count"] = count
+        if offset is not None:
+            params["offset"] = offset
+        if include_old is not None:
+            params["include_old"] = include_old
+        return await self._make_jsonrpc_request("private/get_order_history_by_instrument", params)
+    
+    async def get_order_state(self, order_id: str) -> Dict:
+        """Get order state by order ID"""
+        return await self._make_jsonrpc_request(
+            "private/get_order_state",
+            {"order_id": order_id}
+        )
+    
+    async def get_user_trades_by_currency(self, currency: str = "BTC",
+                                        kind: Optional[str] = None,
+                                        start_id: Optional[str] = None,
+                                        end_id: Optional[str] = None,
+                                        count: Optional[int] = None,
+                                        include_old: Optional[bool] = None,
+                                        sorting: Optional[str] = None) -> Dict:
+        """Get user trades by currency"""
+        params = {"currency": currency}
+        if kind:
+            params["kind"] = kind
+        if start_id:
+            params["start_id"] = start_id
+        if end_id:
+            params["end_id"] = end_id
+        if count is not None:
+            params["count"] = count
+        if include_old is not None:
+            params["include_old"] = include_old
+        if sorting:
+            params["sorting"] = sorting
+        return await self._make_jsonrpc_request("private/get_user_trades_by_currency", params)
+    
+    async def get_user_trades_by_instrument(self, instrument_name: str,
+                                           start_seq: Optional[int] = None,
+                                           end_seq: Optional[int] = None,
+                                           count: Optional[int] = None,
+                                           include_old: Optional[bool] = None,
+                                           sorting: Optional[str] = None) -> Dict:
+        """Get user trades by instrument"""
+        params = {"instrument_name": instrument_name}
+        if start_seq is not None:
+            params["start_seq"] = start_seq
+        if end_seq is not None:
+            params["end_seq"] = end_seq
+        if count is not None:
+            params["count"] = count
+        if include_old is not None:
+            params["include_old"] = include_old
+        if sorting:
+            params["sorting"] = sorting
+        return await self._make_jsonrpc_request("private/get_user_trades_by_instrument", params)
+    
+    async def get_user_trades_by_order(self, order_id: str,
+                                      sorting: Optional[str] = None) -> Dict:
+        """Get user trades by order ID"""
+        params = {"order_id": order_id}
+        if sorting:
+            params["sorting"] = sorting
+        return await self._make_jsonrpc_request("private/get_user_trades_by_order", params)
+    
+    async def get_settlement_history_by_currency(self, currency: str = "BTC",
+                                               count: Optional[int] = None,
+                                               continuation: Optional[str] = None) -> Dict:
+        """Get settlement history by currency"""
+        params = {"currency": currency}
+        if count is not None:
+            params["count"] = count
+        if continuation:
+            params["continuation"] = continuation
+        return await self._make_jsonrpc_request("private/get_settlement_history_by_currency", params)
+    
+    async def get_settlement_history_by_instrument(self, instrument_name: str,
+                                                   count: Optional[int] = None,
+                                                   continuation: Optional[str] = None) -> Dict:
+        """Get settlement history by instrument"""
+        params = {"instrument_name": instrument_name}
+        if count is not None:
+            params["count"] = count
+        if continuation:
+            params["continuation"] = continuation
+        return await self._make_jsonrpc_request("private/get_settlement_history_by_instrument", params)
+    
+    # Note: get_delivery_history method doesn't exist in Deribit API v2
+    # Delivery information is available in settlement history
+    
+    async def buy(self, instrument_name: str, amount: float,
+                 type: str = "market", price: Optional[float] = None,
+                 label: Optional[str] = None, time_in_force: str = "good_til_cancelled",
+                 max_show: Optional[float] = None, post_only: bool = False,
+                 reduce_only: bool = False, stop_price: Optional[float] = None,
+                 trigger: Optional[str] = None, advanced: Optional[str] = None) -> Dict:
+        """Place buy order (simplified interface)"""
+        params = {
+            "instrument_name": instrument_name,
+            "amount": amount,
+            "type": type,
+            "time_in_force": time_in_force,
+            "post_only": post_only,
+            "reduce_only": reduce_only
+        }
+        if price:
+            params["price"] = price
+        if label:
+            params["label"] = label
+        if max_show is not None:
+            params["max_show"] = max_show
+        if stop_price:
+            params["stop_price"] = stop_price
+        if trigger:
+            params["trigger"] = trigger
+        if advanced:
+            params["advanced"] = advanced
+        return await self._make_jsonrpc_request("private/buy", params)
+    
+    async def sell(self, instrument_name: str, amount: float,
+                  type: str = "market", price: Optional[float] = None,
+                  label: Optional[str] = None, time_in_force: str = "good_til_cancelled",
+                  max_show: Optional[float] = None, post_only: bool = False,
+                  reduce_only: bool = False, stop_price: Optional[float] = None,
+                  trigger: Optional[str] = None, advanced: Optional[str] = None) -> Dict:
+        """Place sell order (simplified interface)"""
+        params = {
+            "instrument_name": instrument_name,
+            "amount": amount,
+            "type": type,
+            "time_in_force": time_in_force,
+            "post_only": post_only,
+            "reduce_only": reduce_only
+        }
+        if price:
+            params["price"] = price
+        if label:
+            params["label"] = label
+        if max_show is not None:
+            params["max_show"] = max_show
+        if stop_price:
+            params["stop_price"] = stop_price
+        if trigger:
+            params["trigger"] = trigger
+        if advanced:
+            params["advanced"] = advanced
+        return await self._make_jsonrpc_request("private/sell", params)
+    
+    async def edit(self, order_id: str, amount: Optional[float] = None,
+                  price: Optional[float] = None, post_only: Optional[bool] = None,
+                  advanced: Optional[str] = None, stop_price: Optional[float] = None) -> Dict:
+        """Edit existing order"""
+        params = {"order_id": order_id}
+        if amount is not None:
+            params["amount"] = amount
+        if price is not None:
+            params["price"] = price
+        if post_only is not None:
+            params["post_only"] = post_only
+        if advanced:
+            params["advanced"] = advanced
+        if stop_price is not None:
+            params["stop_price"] = stop_price
+        return await self._make_jsonrpc_request("private/edit", params)
+    
+    async def cancel_all(self, currency: Optional[str] = None,
+                        kind: Optional[str] = None, type: Optional[str] = None) -> Dict:
+        """Cancel all orders"""
+        params = {}
+        if currency:
+            params["currency"] = currency
+        if kind:
+            params["kind"] = kind
+        if type:
+            params["type"] = type
+        return await self._make_jsonrpc_request("private/cancel_all", params)
+    
+    async def cancel_all_by_currency(self, currency: str = "BTC",
+                                    kind: Optional[str] = None,
+                                    type: Optional[str] = None) -> Dict:
+        """Cancel all orders by currency"""
+        params = {"currency": currency}
+        if kind:
+            params["kind"] = kind
+        if type:
+            params["type"] = type
+        return await self._make_jsonrpc_request("private/cancel_all_by_currency", params)
+    
+    async def cancel_all_by_instrument(self, instrument_name: str,
+                                      type: Optional[str] = None) -> Dict:
+        """Cancel all orders by instrument"""
+        params = {"instrument_name": instrument_name}
+        if type:
+            params["type"] = type
+        return await self._make_jsonrpc_request("private/cancel_all_by_instrument", params)
+    
+    async def cancel_by_label(self, label: str) -> Dict:
+        """Cancel order by label"""
+        return await self._make_jsonrpc_request("private/cancel_by_label", {"label": label})
+    
+    async def close_position(self, instrument_name: str,
+                           type: str = "market", price: Optional[float] = None) -> Dict:
+        """Close position"""
+        params = {"instrument_name": instrument_name, "type": type}
+        if price:
+            params["price"] = price
+        return await self._make_jsonrpc_request("private/close_position", params)
+    
+    async def get_margins(self, instrument_name: str, amount: float, price: float) -> Dict:
+        """Get margins for position"""
+        return await self._make_jsonrpc_request(
+            "private/get_margins",
+            {
+                "instrument_name": instrument_name,
+                "amount": amount,
+                "price": price
+            }
+        )
+    
+    async def change_position_size(self, instrument_name: str, amount: float,
+                                  type: str = "market", price: Optional[float] = None) -> Dict:
+        """Change position size"""
+        params = {"instrument_name": instrument_name, "amount": amount, "type": type}
+        if price:
+            params["price"] = price
+        return await self._make_jsonrpc_request("private/change_position_size", params)
+    
+    async def get_trade_volumes(self, extended: bool = False) -> Dict:
+        """Get trade volumes"""
+        return await self._make_jsonrpc_request("public/get_trade_volumes", {"extended": extended})
+    
+    # Note: The following methods don't exist in Deribit API v2:
+    # - get_user_portfolio_margins
+    # - get_user_fees  
+    # - get_user_delivery_fees
+    # Fee and margin information is available in account_summary and positions
+    
+    async def get_deposits(self, currency: str = "BTC", count: Optional[int] = None,
+                          offset: Optional[int] = None) -> Dict:
+        """Get deposit history"""
+        params = {"currency": currency}
+        if count is not None:
+            params["count"] = count
+        if offset is not None:
+            params["offset"] = offset
+        return await self._make_jsonrpc_request("private/get_deposits", params)
+    
+    async def get_withdrawals(self, currency: str = "BTC", count: Optional[int] = None,
+                             offset: Optional[int] = None) -> Dict:
+        """Get withdrawal history"""
+        params = {"currency": currency}
+        if count is not None:
+            params["count"] = count
+        if offset is not None:
+            params["offset"] = offset
+        return await self._make_jsonrpc_request("private/get_withdrawals", params)
+    
+    async def get_transfers(self, currency: str = "BTC", count: Optional[int] = None,
+                           offset: Optional[int] = None) -> Dict:
+        """Get transfer history"""
+        params = {"currency": currency}
+        if count is not None:
+            params["count"] = count
+        if offset is not None:
+            params["offset"] = offset
+        return await self._make_jsonrpc_request("private/get_transfers", params)
+    
+    # Note: get_currency method doesn't exist in Deribit API v2
+    # Currency information is available in account_summary
+    
+    async def get_subaccounts(self, with_portfolio: bool = False) -> List[Dict]:
+        """Get subaccounts"""
+        params = {}
+        if with_portfolio:
+            params["with_portfolio"] = with_portfolio
+        return await self._make_jsonrpc_request("private/get_subaccounts", params)
+    
+    async def get_subaccounts_details(self, currency: str, with_open_orders: bool = False) -> Dict:
+        """Get subaccounts details"""
+        return await self._make_jsonrpc_request(
+            "private/get_subaccounts_details",
+            {"currency": currency, "with_open_orders": with_open_orders}
+        )
+    
+    async def create_subaccount(self, name: str) -> Dict:
+        """Create subaccount"""
+        return await self._make_jsonrpc_request("private/create_subaccount", {"name": name})
+    
+    async def change_subaccount_name(self, sid: int, name: str) -> Dict:
+        """Change subaccount name"""
+        return await self._make_jsonrpc_request(
+            "private/change_subaccount_name",
+            {"sid": sid, "name": name}
+        )
+    
+    # Note: get_subaccounts_summary method doesn't exist in Deribit API v2
+    # Use get_subaccounts to get subaccount information
+    
+    async def get_email_language(self) -> Dict:
+        """Get email language setting"""
+        return await self._make_jsonrpc_request("private/get_email_language")
+    
+    async def set_email_language(self, language: str) -> Dict:
+        """Set email language"""
+        return await self._make_jsonrpc_request("private/set_email_language", {"language": language})
+    
+    async def get_announcements(self, start_timestamp: Optional[str] = None) -> List[Dict]:
+        """Get announcements"""
+        params = {}
+        if start_timestamp:
+            params["start_timestamp"] = start_timestamp
+        return await self._make_jsonrpc_request("public/get_announcements", params)
     
     # WebSocket methods
     async def connect_websocket(self):
@@ -614,6 +1291,28 @@ class DeribitClient:
         
         await self.websocket.send(json.dumps(message))
         logger.info(f"Subscribed to channels: {channels}")
+    
+    async def subscribe(self, channels: List[str], private: bool = False) -> None:
+        """
+        Subscribe to WebSocket channels (public or private)
+        
+        Args:
+            channels: List of channel names (e.g., ["book.BTC_USDC-PERPETUAL.none.10.100ms"])
+            private: If True, use private/subscribe (requires authentication)
+        """
+        if not self.websocket:
+            await self.connect_websocket()
+        
+        method = "private/subscribe" if private else "public/subscribe"
+        message = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": {"channels": channels},
+            "id": 1
+        }
+        
+        await self.websocket.send(json.dumps(message))
+        logger.info(f"Subscribed to {'private' if private else 'public'} channels: {channels}")
     
     def register_message_handler(self, channel_pattern: str, handler: Callable):
         """Register a message handler for specific channel pattern"""

@@ -52,10 +52,12 @@ class SessionManager:
     - Session monitoring and health checks
     """
     
-    def __init__(self, config: DeribitConfig, base_client_id: str, private_key_path: str):
+    def __init__(self, config: DeribitConfig, base_client_id: str, 
+                 private_key_path: Optional[str] = None, private_key: Optional[str] = None):
         self.config = config
         self.base_client_id = base_client_id
         self.private_key_path = private_key_path
+        self.private_key = private_key
         self.sessions: Dict[str, SessionInfo] = {}
         self.base_session: Optional[DeribitClient] = None
         self.base_auth: Optional[DeribitAuth] = None
@@ -72,6 +74,7 @@ class SessionManager:
             self.base_auth = DeribitAuth(
                 client_id=self.base_client_id,
                 private_key_path=self.private_key_path,
+                private_key=self.private_key,
                 session_name="base_session"
             )
             
@@ -111,6 +114,7 @@ class SessionManager:
             session_auth = DeribitAuth(
                 client_id=self.base_client_id,
                 private_key_path=self.private_key_path,
+                private_key=self.private_key,
                 session_name=session_name
             )
             
@@ -362,9 +366,10 @@ class MultiSessionTradingApp:
     with separate authentication sessions for better isolation.
     """
     
-    def __init__(self, config: DeribitConfig, base_client_id: str, private_key_path: str):
+    def __init__(self, config: DeribitConfig, base_client_id: str, 
+                 private_key_path: Optional[str] = None, private_key: Optional[str] = None):
         self.config = config
-        self.session_manager = SessionManager(config, base_client_id, private_key_path)
+        self.session_manager = SessionManager(config, base_client_id, private_key_path, private_key)
         self.strategies: Dict[str, Any] = {}  # session_id -> strategy
         
     async def initialize(self) -> bool:

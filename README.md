@@ -26,6 +26,8 @@ A comprehensive Python package for implementing trading algorithms on Deribit ex
 - **Backtesting Environment Builder**: Automated historical data collection and curve building
 - **Real-time Dashboard**: Web-based dashboard for live volatility monitoring
 - **Risk Management**: Position sizing, margin management, and portfolio risk assessment
+- **Market Making Strategies**: Simple and sophisticated market making with volatility-based spreads
+- **Multi-session Support**: Run multiple trading strategies simultaneously with session management
 
 ## Installation
 
@@ -51,7 +53,75 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### 1. Real-time IV Monitoring
+### 1. Deribit API Wrapper
+
+The Deribit API client is the foundation of the toolkit. It provides a clean interface for both REST and WebSocket APIs:
+
+```python
+import asyncio
+from deribit_trading_toolkit import DeribitClient, DeribitAuth
+from deribit_trading_toolkit.utils.config import ConfigManager
+
+async def main():
+    config = ConfigManager().get_config()
+    auth = DeribitAuth(
+        config.deribit.effective_client_id,
+        config.deribit.effective_private_key_path,
+        config.deribit.effective_private_key
+    )
+    
+    client = DeribitClient(config.deribit, auth)
+    await client.connect()
+    
+    try:
+        # Get market data
+        ticker = await client.get_ticker("BTC-PERPETUAL")
+        print(f"BTC Price: ${ticker.mark_price}")
+        
+        # Get option chain
+        instruments = await client.get_instruments("BTC", "option")
+        print(f"Found {len(instruments)} options")
+        
+        # Subscribe to mark price updates
+        await client.subscribe_to_mark_price()
+        
+        # Register handler
+        def on_mark_price(channel, msg):
+            print(f"Mark price update: {msg}")
+        
+        client.register_message_handler(
+            r"markprice\.options\.btc_usd",
+            on_mark_price
+        )
+        
+        # Listen for messages
+        await client.listen_for_messages()
+        
+    finally:
+        await client.disconnect()
+
+asyncio.run(main())
+```
+
+**Features:**
+- REST API wrapper for all Deribit endpoints
+- WebSocket support for real-time data streaming
+- Automatic authentication with RSA or secret key
+- Message handler registration for WebSocket channels
+- Support for both mainnet and testnet
+- Rate limiting and connection management
+- Multi-session support with fork tokens
+
+**Key Methods:**
+- `get_ticker(instrument)`: Get current ticker data
+- `get_instruments(currency, kind)`: Get list of instruments
+- `get_orderbook(instrument)`: Get orderbook data
+- `subscribe_to_mark_price()`: Subscribe to mark price updates
+- `subscribe_to_ticker(channels)`: Subscribe to ticker channels
+- `register_message_handler(pattern, handler)`: Register WebSocket message handlers
+- `listen_for_messages()`: Start listening for WebSocket messages
+
+### 2. Real-time IV Monitoring
 
 Monitor implied volatility curves in real-time with SVI fitting and term structure analysis:
 
@@ -74,10 +144,10 @@ async def main():
 asyncio.run(main())
 ```
 
-Or use the command-line entry point:
+Or use the example script:
 
 ```bash
-python realtime_iv.py
+python examples/realtime_iv.py
 ```
 
 **Features:**
@@ -87,7 +157,7 @@ python realtime_iv.py
 - Automatic expiration selection (daily, weekly, monthly, quarterly)
 - Web-based dashboard with auto-refresh
 
-### 2. Building Backtesting Environment
+### 3. Building Backtesting Environment
 
 Create a backtesting environment with historical data:
 
@@ -116,10 +186,10 @@ async def main():
 asyncio.run(main())
 ```
 
-Or use the test script:
+Or use the example script:
 
 ```bash
-python test_backtesting.py
+python examples/backtestEnv_option.py
 ```
 
 **Features:**
@@ -128,7 +198,7 @@ python test_backtesting.py
 - Database storage for futures, options, and curves
 - Configurable time windows and resolution
 
-### 3. Options Backtesting
+### 4. Options Backtesting
 
 Simulate options trading strategies with PnL decomposition:
 
@@ -178,10 +248,10 @@ async def main():
 asyncio.run(main())
 ```
 
-Or use the test script:
+Or use the example script:
 
 ```bash
-python test_simple_option.py
+python examples/option_backtest.py
 ```
 
 **Features:**
@@ -191,48 +261,54 @@ python test_simple_option.py
 - Comparison of real PnL vs. Taylor expansion approximation
 - Comprehensive visualization with cumulative PnL and decomposition charts
 
-### 4. Deribit API Wrapper
+### 5. Market Making Strategies
 
-Basic usage of the Deribit API client:
+The toolkit includes two market making strategies:
+
+#### Simple Market Maker
+
+A basic market making strategy that places limit orders on both sides of the orderbook:
 
 ```python
 import asyncio
-from deribit_trading_toolkit import DeribitClient, DeribitAuth
-from deribit_trading_toolkit.utils.config import ConfigManager
+from deribit_trading_toolkit import DeribitClient, DeribitAuth, ConfigManager
+from deribit_trading_toolkit.strategies.market_maker import SimpleMarketMaker, MarketMakerConfig
+from deribit_trading_toolkit.risk.manager import RiskManager, RiskLimits
 
 async def main():
     config = ConfigManager().get_config()
     auth = DeribitAuth(
-        config.deribit.client_id,
-        config.deribit.private_key_path
+        config.deribit.effective_client_id,
+        config.deribit.effective_private_key_path,
+        config.deribit.effective_private_key
     )
     
     client = DeribitClient(config.deribit, auth)
     await client.connect()
     
     try:
-        # Get market data
-        ticker = await client.get_ticker("BTC-PERPETUAL")
-        print(f"BTC Price: ${ticker.mark_price}")
+        # Setup risk manager
+        risk_limits = RiskLimits(
+            max_position_size=0.5,
+            max_portfolio_risk=0.2
+        )
+        risk_manager = RiskManager(client, risk_limits)
         
-        # Get option chain
-        instruments = await client.get_instruments("BTC", "option")
-        print(f"Found {len(instruments)} options")
-        
-        # Subscribe to mark price updates
-        await client.subscribe_to_mark_price()
-        
-        # Register handler
-        def on_mark_price(channel, msg):
-            print(f"Mark price update: {msg}")
-        
-        client.register_message_handler(
-            r"markprice\.options\.btc_usd",
-            on_mark_price
+        # Create market maker
+        mm_config = MarketMakerConfig(
+            instrument="BTC-PERPETUAL",
+            spread_bps=10,  # 0.1% spread
+            order_size=0.01,
+            max_position=0.5
         )
         
-        # Listen for messages
-        await client.listen_for_messages()
+        market_maker = SimpleMarketMaker(
+            config=mm_config,
+            client=client,
+            risk_manager=risk_manager
+        )
+        
+        await market_maker.start()
         
     finally:
         await client.disconnect()
@@ -240,38 +316,176 @@ async def main():
 asyncio.run(main())
 ```
 
+Or use the example script:
+
+```bash
+python examples/market_maker.py
+```
+
+#### Sophisticated Market Maker
+
+An advanced market making strategy with volatility-based spread adjustment and inventory management:
+
+```python
+import asyncio
+from deribit_trading_toolkit import DeribitClient, DeribitAuth, ConfigManager
+from deribit_trading_toolkit.strategies.sophisticated_mm import SophisticatedMarketMaker, SophisticatedMMConfig
+from deribit_trading_toolkit.risk.manager import RiskManager, RiskLimits
+
+async def main():
+    config = ConfigManager().get_config()
+    auth = DeribitAuth(
+        config.deribit.effective_client_id,
+        config.deribit.effective_private_key_path,
+        config.deribit.effective_private_key
+    )
+    
+    client = DeribitClient(config.deribit, auth)
+    await client.connect()
+    
+    try:
+        # Setup risk manager
+        risk_limits = RiskLimits(
+            max_position_size=0.5,
+            max_portfolio_risk=0.2
+        )
+        risk_manager = RiskManager(client, risk_limits)
+        
+        # Create sophisticated market maker
+        mm_config = SophisticatedMMConfig(
+            instrument="BTC-PERPETUAL",
+            base_spread_bps=10,
+            volatility_multiplier=1.5,
+            inventory_skew_factor=0.1,
+            order_size=0.01,
+            max_position=0.5
+        )
+        
+        market_maker = SophisticatedMarketMaker(
+            config=mm_config,
+            client=client,
+            risk_manager=risk_manager
+        )
+        
+        await market_maker.start()
+        
+    finally:
+        await client.disconnect()
+
+asyncio.run(main())
+```
+
+Or use the example script:
+
+```bash
+python examples/sophisticated_mm.py
+```
+
+**Features:**
+- Real-time orderbook subscription via WebSocket
+- Volatility-based spread adjustment
+- Inventory-based quote skewing
+- Risk management with position limits
+- Automatic order cancellation and replacement
+
+
 ## Configuration
 
 ### Required Setup
 
-1. **Deribit API Credentials**:
-   - Create a file `key/client_id.txt` with your Deribit client ID
-   - Place your RSA private key at `key/private.pem`
+1. **Create `.env` file**:
+   - Copy `.env.example` to `.env`:
+     ```bash
+     cp .env.example .env
+     ```
+   - Edit `.env` and fill in your credentials:
+     - **Mainnet credentials:**
+       - `DERIBIT_CLIENT_ID`: Your Deribit mainnet client ID
+       - **Option 1 (Recommended):** `DERIBIT_PRIVATE_KEY_PATH`: Path to your RSA private key file (default: `key/private.pem`)
+       - **Option 2:** `DERIBIT_PRIVATE_KEY`: Direct secret key string (leave `DERIBIT_PRIVATE_KEY_PATH` empty if using this)
+     - **Testnet credentials (optional, but recommended for testing):**
+       - `DERIBIT_CLIENT_ID_TESTNET`: Your Deribit testnet client ID
+       - **Option 1:** `DERIBIT_PRIVATE_KEY_PATH_TESTNET`: Path to your RSA private key file (default: `key/private_testnet.pem`)
+       - **Option 2 (Recommended for testnet):** `DERIBIT_PRIVATE_KEY_TESTNET`: Direct secret key string (leave `DERIBIT_PRIVATE_KEY_PATH_TESTNET` empty if using this)
+     - Place your RSA private key files at the specified paths (if using Option 1)
+     - Set `DERIBIT_TESTNET=false` for mainnet or `DERIBIT_TESTNET=true` for testnet
 
 2. **Database Configuration** (for backtesting):
    - Set up MySQL database
-   - Configure in `deribit_trading_toolkit/utils/config.py` or use environment variables:
+   - Configure in `.env` file:
      ```bash
-     export DB_HOST=localhost
-     export DB_USER=root
-     export DB_PASSWORD=your_password
-     export DB_NAME=btc_options_db
+     DB_HOST=localhost
+     DB_USER=root
+     DB_PASSWORD=your_password
+     DB_NAME=btc_options_db
+     DB_PORT=3306
      ```
 
 3. **Optional: Telegram Notifications**:
-   - `key/bot_token.txt`: Telegram bot token
-   - `key/chat_id.txt`: Telegram chat ID
+   - Add to `.env`:
+     ```bash
+     TELEGRAM_BOT_TOKEN=your_bot_token
+     TELEGRAM_CHAT_ID=your_chat_id
+     ```
 
 ### Environment Variables
 
-```bash
-export DERIBIT_TESTNET=false
-export TRADING_EXECUTION_ENABLED=false
-export DB_HOST=localhost
-export DB_USER=root
-export DB_PASSWORD=your_password
-export DB_NAME=btc_options_db
-```
+All configuration is managed through the `.env` file. The following variables are available:
+
+**Deribit API - Mainnet:**
+- `DERIBIT_CLIENT_ID`: Your Deribit mainnet client ID (required for mainnet)
+- `DERIBIT_PRIVATE_KEY_PATH`: Path to RSA private key for mainnet (default: `key/private.pem`)
+- `DERIBIT_PRIVATE_KEY`: Direct secret key string for mainnet (alternative to `DERIBIT_PRIVATE_KEY_PATH`)
+
+**Deribit API - Testnet:**
+- `DERIBIT_CLIENT_ID_TESTNET`: Your Deribit testnet client ID (required for testnet)
+- `DERIBIT_PRIVATE_KEY_PATH_TESTNET`: Path to RSA private key for testnet (default: `key/private_testnet.pem`)
+- `DERIBIT_PRIVATE_KEY_TESTNET`: Direct secret key string for testnet (alternative to `DERIBIT_PRIVATE_KEY_PATH_TESTNET`)
+
+**Deribit API Settings:**
+- `DERIBIT_TESTNET`: Use testnet (`true`/`false`, default: `false`)
+  - When `true`, uses testnet credentials and testnet API endpoints
+  - When `false`, uses mainnet credentials and mainnet API endpoints
+- `DERIBIT_RATE_LIMIT`: API rate limit (default: `20`)
+- `DERIBIT_TIMEOUT`: Request timeout in seconds (default: `30`)
+
+> **Note:** You can use either a `.pem` file path OR a direct secret key string. If both are provided, the secret key string takes precedence. For mainnet, using RSA key files (`.pem`) is recommended for better security. For testnet, you can use direct secret keys for convenience. You can configure both mainnet and testnet credentials in `.env`. The system will automatically use the appropriate credentials based on the `DERIBIT_TESTNET` setting. If testnet credentials are not provided, it will fall back to mainnet credentials.
+
+**Database:**
+- `DB_HOST`: Database host (default: `localhost`)
+- `DB_USER`: Database user (default: `root`)
+- `DB_PASSWORD`: Database password
+- `DB_NAME`: Database name (default: `btc_options_db`)
+- `DB_PORT`: Database port (default: `3306`)
+
+**Telegram (Optional):**
+- `TELEGRAM_BOT_TOKEN`: Telegram bot token
+- `TELEGRAM_CHAT_ID`: Telegram chat ID
+
+**Trading:**
+- `TRADING_NEAR_EXPIRATION`: Near expiration date
+- `TRADING_FAR_EXPIRATION`: Far expiration date
+- `TRADING_SPREAD_WAY`: Spread direction (`SHORT` or `LONG`, default: `SHORT`)
+- `TRADING_EXECUTION_ENABLED`: Enable trading execution (default: `false`)
+- `TRADING_POSITION_SIZE`: Position size (default: `0.1`)
+- `TRADING_MAX_POSITIONS`: Maximum positions (default: `4`)
+
+**Risk Management:**
+- `RISK_MAX_POSITION_SIZE`: Maximum position size (default: `0.1`)
+- `RISK_MAX_PORTFOLIO_RISK`: Maximum portfolio risk (default: `0.2`)
+- `RISK_MARGIN_BUFFER`: Margin buffer (default: `1.2`)
+- `RISK_MAX_DAILY_LOSS`: Maximum daily loss (default: `0.1`)
+- `RISK_STOP_LOSS_PERCENTAGE`: Stop loss percentage (default: `0.05`)
+
+**Logging:**
+- `LOG_LEVEL`: Logging level (default: `INFO`)
+- `LOG_FILE_PATH`: Path to log file (optional)
+- `LOG_MAX_FILE_SIZE`: Maximum log file size in bytes (default: `10485760`)
+- `LOG_BACKUP_COUNT`: Number of backup log files (default: `5`)
+
+> **Note:** The `.env` file is automatically loaded when the package is imported. You can also set these as system environment variables, which will take precedence over the `.env` file.
+
+> **Legacy Support:** The code still supports reading from `key/*.txt` files for backward compatibility, but using `.env` is the recommended approach.
 
 ## Project Structure
 
@@ -297,11 +511,16 @@ deribit_trading_toolkit/
 ├── visualization/         # Plotting and visualization
 │   ├── term_structure.py  # Term structure visualization
 │   └── vol_curve.py       # Volatility curve visualization
+├── strategies/            # Trading strategies
+│   ├── base.py            # Base strategy framework
+│   ├── market_maker.py    # Simple market making strategy
+│   └── sophisticated_mm.py # Advanced market making strategy
 ├── utils/                 # Utilities
 │   ├── config.py          # Configuration management
 │   └── expiration_selector.py  # Expiration selection logic
-└── risk/                  # Risk management
-    └── manager.py         # Risk management system
+├── risk/                  # Risk management
+│   └── manager.py         # Risk management system
+└── main.py                # Main application controller
 ```
 
 ## Key Features Explained
@@ -372,15 +591,46 @@ delta_min = calc.calculate_delta_min(
 
 ## Examples
 
-### Example Scripts
+The `examples/` directory contains comprehensive example scripts:
 
-- **`realtime_iv.py`**: Real-time IV monitoring entry point
-- **`test_backtesting.py`**: Backtesting environment builder
-- **`test_simple_option.py`**: Options backtesting simulation
+### Real-time Monitoring
+- **`realtime_iv.py`**: Real-time IV monitoring with SVI fitting and term structure visualization
+- **`visualize_vol_curves.py`**: Volatility curve visualization and analysis
 
-### Advanced Usage
+### Backtesting
+- **`backtestEnv_option.py`**: Build backtesting environment with historical data collection
+- **`option_backtest.py`**: Options backtesting simulation with PnL decomposition
 
-See the `examples/` directory for more detailed examples and tutorials.
+### Trading Strategies
+- **`market_maker.py`**: Simple market making strategy example
+- **`sophisticated_mm.py`**: Advanced market making with volatility-based spreads
+
+### General Usage
+- **`example_usage.py`**: General toolkit usage examples and patterns
+
+All examples can be run directly:
+
+```bash
+# Real-time IV monitoring
+python examples/realtime_iv.py
+
+# Build backtesting environment
+python examples/backtestEnv_option.py
+
+# Run options backtest
+python examples/option_backtest.py
+
+# Run market maker (testnet)
+python examples/market_maker.py
+
+# Run sophisticated market maker (testnet)
+python examples/sophisticated_mm.py
+
+# Visualize volatility curves
+python examples/visualize_vol_curves.py
+```
+
+> **Note**: Market making examples require `DERIBIT_TESTNET=true` in your `.env` file for safety.
 
 ## Contributing
 
@@ -401,15 +651,18 @@ pytest
 # Run with coverage
 pytest --cov=deribit_trading_toolkit --cov-report=html
 
-# Run specific test
-pytest test_backtesting.py
-pytest test_simple_option.py
+# Run specific test file
+pytest tests/test_backtesting.py
+pytest tests/test_simple_option.py
 ```
+
+> **Note**: Test files are located in the `tests/` directory (if present). Example scripts in `examples/` can also serve as integration tests.
 
 ## Documentation
 
 - **API Reference**: See docstrings in source code
-- **Examples**: Check `test_*.py` files for usage examples
+- **Examples**: Check `examples/` directory for comprehensive usage examples
+- **Project Structure**: See `PROJECT_STRUCTURE.md` for detailed architecture documentation
 - **Tutorials**: Coming soon
 
 ## License
@@ -422,8 +675,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/TradingAlgorithmForDeribit/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/TradingAlgorithmForDeribit/discussions)
+- **Issues**: [GitHub Issues](https://github.com/chanhyeong28/TradingAlgorithmForDeribit/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/chanhyeong28/TradingAlgorithmForDeribit/discussions)
 
 ## Citation
 
@@ -432,9 +685,9 @@ If you use this toolkit in your research, please cite:
 ```bibtex
 @software{deribit_trading_toolkit,
   title = {Deribit Trading Toolkit},
-  author = {Your Name},
+  author = {Chanhyeong28},
   year = {2024},
-  url = {https://github.com/yourusername/TradingAlgorithmForDeribit}
+  url = {https://github.com/chanhyeong28/TradingAlgorithmForDeribit}
 }
 ```
 

@@ -8,8 +8,14 @@ specific options with optional delta hedging.
 
 import asyncio
 import logging
+import os
+import sys
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from deribit_trading_toolkit import SimpleOptionBacktester, OptionSpec
 
 logging.basicConfig(

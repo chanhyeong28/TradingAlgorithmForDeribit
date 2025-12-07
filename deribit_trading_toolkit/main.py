@@ -126,8 +126,9 @@ class TradingApp:
             
             # Initialize authentication
             self.auth = DeribitAuth(
-                client_id=self.config.deribit.client_id,
-                private_key_path=self.config.deribit.private_key_path
+                client_id=self.config.deribit.effective_client_id,
+                private_key_path=self.config.deribit.effective_private_key_path,
+                private_key=self.config.deribit.effective_private_key
             )
             
             # Initialize client
@@ -196,14 +197,16 @@ class TradingApp:
         try:
             self.session_manager = SessionManager(
                 config=self.config.deribit,
-                base_client_id=self.config.deribit.client_id,
-                private_key_path=self.config.deribit.private_key_path
+                base_client_id=self.config.deribit.effective_client_id,
+                private_key_path=self.config.deribit.effective_private_key_path,
+                private_key=self.config.deribit.effective_private_key
             )
             
             self.multi_session_app = MultiSessionTradingApp(
                 config=self.config.deribit,
-                base_client_id=self.config.deribit.client_id,
-                private_key_path=self.config.deribit.private_key_path
+                base_client_id=self.config.deribit.effective_client_id,
+                private_key_path=self.config.deribit.effective_private_key_path,
+                private_key=self.config.deribit.effective_private_key
             )
             
             await self.multi_session_app.initialize()

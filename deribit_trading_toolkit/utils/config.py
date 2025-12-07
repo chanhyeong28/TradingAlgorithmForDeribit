@@ -11,8 +11,12 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 import logging
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+# Load .env file if it exists
+load_dotenv()
 
 
 @dataclass
@@ -36,9 +40,18 @@ class DeribitConfig:
     ws_url: str = "wss://www.deribit.com/ws/api/v2"
     api_url: str = "https://www.deribit.com/api/v2"
     testnet: bool = False
+    
+    # Mainnet credentials
     client_id: str = ""
-    private_key_path: str = "key/private.pem"
-    rate_limit: int = 20  # requests per second
+    private_key_path: str = "key/private.pem"  # For RSA key file
+    private_key: Optional[str] = None  # For direct secret key string
+    
+    # Testnet credentials
+    client_id_testnet: str = ""
+    private_key_path_testnet: str = "key/private_testnet.pem"  # For RSA key file
+    private_key_testnet: Optional[str] = None  # For direct secret key string
+    
+    rate_limit: int = 20
     timeout: int = 30
     
     @property
@@ -60,6 +73,41 @@ class DeribitConfig:
     def effective_api_url(self) -> str:
         """Get effective API URL based on testnet setting"""
         return self.api_url_testnet if self.testnet else self.api_url
+    
+    @property
+    def effective_client_id(self) -> str:
+        """Get effective client ID based on testnet setting"""
+        if self.testnet:
+            return self.client_id_testnet if self.client_id_testnet else self.client_id
+        return self.client_id
+    
+    @property
+    def effective_private_key_path(self) -> Optional[str]:
+        """Get effective private key path based on testnet setting"""
+        if self.testnet:
+            # If testnet key string is provided, return None (will use string)
+            if self.private_key_testnet:
+                return None
+            # If testnet key path is explicitly set and different from default, use it
+            if self.private_key_path_testnet and self.private_key_path_testnet != "key/private_testnet.pem":
+                return self.private_key_path_testnet
+            # If testnet client ID is set, prefer testnet key path (even if default)
+            if self.client_id_testnet:
+                return self.private_key_path_testnet if self.private_key_path_testnet else self.private_key_path
+            # Fall back to mainnet if no testnet credentials
+            return self.private_key_path
+        else:
+            # If mainnet key string is provided, return None (will use string)
+            if self.private_key:
+                return None
+            return self.private_key_path
+    
+    @property
+    def effective_private_key(self) -> Optional[str]:
+        """Get effective private key string based on testnet setting"""
+        if self.testnet:
+            return self.private_key_testnet if self.private_key_testnet else self.private_key
+        return self.private_key
 
 
 @dataclass
@@ -239,6 +287,8 @@ class AppConfig:
                     'testnet': self.deribit.testnet,
                     'client_id': self.deribit.client_id,
                     'private_key_path': self.deribit.private_key_path,
+                    'client_id_testnet': self.deribit.client_id_testnet,
+                    'private_key_path_testnet': self.deribit.private_key_path_testnet,
                     'rate_limit': self.deribit.rate_limit,
                     'timeout': self.deribit.timeout
                 },
@@ -293,11 +343,22 @@ class AppConfig:
             errors.append("Database host is required")
         
         # Validate Deribit config
-        if not self.deribit.client_id:
-            errors.append("Deribit client ID is required")
-        
-        if not os.path.exists(self.deribit.private_key_path):
-            errors.append(f"Private key file not found: {self.deribit.private_key_path}")
+        effective_client_id = self.deribit.effective_client_id
+        effective_private_key_path = self.deribit.effective_private_key_path
+        effective_private_key = self.deribit.effective_private_key
+
+        if not effective_client_id:
+            env_type = "testnet" if self.deribit.testnet else "mainnet"
+            errors.append(f"Deribit {env_type} client ID is required")
+
+        # Must have either key path or key string
+        if not effective_private_key_path and not effective_private_key:
+            env_type = "testnet" if self.deribit.testnet else "mainnet"
+            errors.append(f"Deribit {env_type} private key (path or string) is required")
+
+        # If using file path, check if file exists
+        if effective_private_key_path and not os.path.exists(effective_private_key_path):
+            errors.append(f"Private key file not found: {effective_private_key_path}")
         
         # Validate trading config
         if not self.trading.is_valid:
@@ -331,16 +392,62 @@ class AppConfig:
         config = DeribitConfig()
         
         try:
-            # Load client ID
-            client_id_file = config_path / 'key' / 'client_id.txt'
-            if client_id_file.exists():
-                with open(client_id_file, 'r') as f:
-                    config.client_id = f.readline().strip()
+            # Load mainnet credentials from environment variables (preferred)
+            config.client_id = os.getenv('DERIBIT_CLIENT_ID', '')
+            private_key_path = os.getenv('DERIBIT_PRIVATE_KEY_PATH', '')
+            private_key_string = os.getenv('DERIBIT_PRIVATE_KEY', '')  # New: direct key string
             
-            # Load private key path
-            private_key_file = config_path / 'key' / 'private.pem'
-            if private_key_file.exists():
-                config.private_key_path = str(private_key_file)
+            # Load testnet credentials from environment variables
+            config.client_id_testnet = os.getenv('DERIBIT_CLIENT_ID_TESTNET', '')
+            private_key_path_testnet = os.getenv('DERIBIT_PRIVATE_KEY_PATH_TESTNET', '')
+            private_key_string_testnet = os.getenv('DERIBIT_PRIVATE_KEY_TESTNET', '')  # New: direct key string
+            
+            # Set mainnet private key (prefer string over file path)
+            if private_key_string:
+                config.private_key = private_key_string
+                config.private_key_path = ''  # Clear path when using string
+            elif private_key_path:
+                config.private_key_path = private_key_path
+            else:
+                # Check if key/private.pem exists (legacy support)
+                private_key_file = config_path / 'key' / 'private.pem'
+                if private_key_file.exists():
+                    config.private_key_path = str(private_key_file)
+                else:
+                    config.private_key_path = 'key/private.pem'
+            
+            # Set testnet private key (prefer string over file path)
+            if private_key_string_testnet:
+                config.private_key_testnet = private_key_string_testnet
+                config.private_key_path_testnet = ''  # Clear path when using string
+            elif private_key_path_testnet:
+                config.private_key_path_testnet = private_key_path_testnet
+            else:
+                # Check if key/private_testnet.pem exists
+                private_key_testnet_file = config_path / 'key' / 'private_testnet.pem'
+                if private_key_testnet_file.exists():
+                    config.private_key_path_testnet = str(private_key_testnet_file)
+                else:
+                    config.private_key_path_testnet = 'key/private_testnet.pem'
+            
+            # Fallback to key directory for mainnet client_id (legacy support)
+            if not config.client_id:
+                client_id_file = config_path / 'key' / 'client_id.txt'
+                if client_id_file.exists():
+                    with open(client_id_file, 'r') as f:
+                        config.client_id = f.readline().strip()
+            
+            # Fallback to key directory for testnet client_id (legacy support)
+            if not config.client_id_testnet:
+                testnet_file = config_path / 'key' / 'testnet.txt'
+                if testnet_file.exists():
+                    with open(testnet_file, 'r') as f:
+                        for line in f:
+                            if line.startswith('ClientID'):
+                                parts = line.split('=')
+                                if len(parts) > 1:
+                                    config.client_id_testnet = parts[1].strip()
+                                    break
             
             # Load from environment variables
             config.testnet = os.getenv('DERIBIT_TESTNET', 'false').lower() == 'true'
@@ -358,22 +465,36 @@ class AppConfig:
         config = TelegramConfig()
         
         try:
-            # Load bot token
-            bot_token_file = config_path / 'key' / 'bot_token.txt'
-            if bot_token_file.exists():
-                with open(bot_token_file, 'r') as f:
-                    config.bot_token = f.readline().strip()
-                    config.enabled = True
+            # Load from environment variables (preferred)
+            config.bot_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+            chat_id_str = os.getenv('TELEGRAM_CHAT_ID', '')
             
-            # Load chat ID
-            chat_id_file = config_path / 'key' / 'chat_id.txt'
-            if chat_id_file.exists():
-                with open(chat_id_file, 'r') as f:
-                    chat_id_str = f.readline().strip()
-                    try:
-                        config.chat_id = int(chat_id_str)
-                    except ValueError:
-                        logger.warning(f"Invalid chat ID: {chat_id_str}")
+            if chat_id_str:
+                try:
+                    config.chat_id = int(chat_id_str)
+                except ValueError:
+                    logger.warning(f"Invalid chat ID: {chat_id_str}")
+            
+            # Fallback to key directory files (legacy support)
+            if not config.bot_token:
+                bot_token_file = config_path / 'key' / 'bot_token.txt'
+                if bot_token_file.exists():
+                    with open(bot_token_file, 'r') as f:
+                        config.bot_token = f.readline().strip()
+            
+            if config.chat_id is None and not chat_id_str:
+                chat_id_file = config_path / 'key' / 'chat_id.txt'
+                if chat_id_file.exists():
+                    with open(chat_id_file, 'r') as f:
+                        chat_id_str = f.readline().strip()
+                        try:
+                            config.chat_id = int(chat_id_str)
+                        except ValueError:
+                            logger.warning(f"Invalid chat ID: {chat_id_str}")
+            
+            # Enable if configured
+            if config.bot_token and config.chat_id is not None:
+                config.enabled = True
             
         except Exception as e:
             logger.warning(f"Error loading Telegram config: {e}")

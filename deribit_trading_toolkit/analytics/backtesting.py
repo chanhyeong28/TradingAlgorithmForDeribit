@@ -104,7 +104,11 @@ class HistoricalDataCollector:
         """Async context manager entry"""
         if not self.client:
             cfg = ConfigManager().get_config()
-            auth = DeribitAuth(cfg.deribit.client_id, cfg.deribit.private_key_path)
+            auth = DeribitAuth(
+                client_id=cfg.deribit.effective_client_id,
+                private_key_path=cfg.deribit.effective_private_key_path,
+                private_key=cfg.deribit.effective_private_key
+            )
             self.client = DeribitClient(cfg.deribit, auth)
             await self.client.connect()
             self._should_close_client = True
