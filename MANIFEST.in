@@ -8,11 +8,8 @@ recursive-exclude * *.py[co]
 recursive-exclude * .DS_Store
 exclude key/*
 exclude old_version/*
-exclude refactored/*
+exclude tests/*
+exclude examples/*
 exclude *.png
 exclude *.sql
-exclude visualize_vol_curves.py
-exclude test_*.py
-exclude example_*.py
-exclude realtime_iv.py
 

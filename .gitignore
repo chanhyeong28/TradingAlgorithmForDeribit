@@ -228,7 +228,6 @@ atm_slope_*.png
 
 # Old/refactored code
 old_version/
-refactored/
 
 # DS_store
 .DS_Store

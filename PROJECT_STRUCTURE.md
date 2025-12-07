@@ -37,18 +37,24 @@ TradingAlgorithmForDeribit/
 │   │   └── base.py            # Base strategy framework
 │   └── main.py                # Main application controller
 │
-├── test_backtesting.py         # Backtesting environment builder example
-├── test_simple_option.py       # Options backtesting simulation example
-├── realtime_iv.py             # Real-time IV monitoring entry point
-├── example_usage.py           # General usage examples
+├── tests/                      # Test files
+│   ├── test_backtesting.py     # Backtesting environment builder test
+│   ├── test_simple_option.py   # Options backtesting simulation test
+│   └── test_execute.py         # Execution tests
 │
-├── key/                        # Configuration files (not in repo)
-│   ├── client_id.txt          # Deribit client ID
-│   ├── private.pem            # RSA private key
-│   ├── bot_token.txt          # Telegram bot token (optional)
-│   └── chat_id.txt            # Telegram chat ID (optional)
+├── examples/                    # Example scripts
+│   ├── realtime_iv.py          # Real-time IV monitoring entry point
+│   ├── example_usage.py        # General usage examples
+│   └── visualize_vol_curves.py # Volatility curve visualization
 │
-├── sql/                        # Database schema
+├── key/                         # Private key storage (not in repo)
+│   ├── private.pem             # RSA private key (required)
+│   └── generate_key.py        # Key generation utility
+│
+├── .env                         # Environment variables (not in repo)
+├── .env.example                 # Environment variables template
+│
+├── sql/                         # Database schema
 │   ├── create_tables.sql       # Initial database schema
 │   └── migrate_add_svi_columns.sql  # SVI migration
 │
@@ -70,17 +76,17 @@ TradingAlgorithmForDeribit/
 ## Main Entry Points
 
 ### 1. Real-time IV Monitoring
-- **Script**: `realtime_iv.py`
+- **Script**: `examples/realtime_iv.py`
 - **Module**: `deribit_trading_toolkit.apps.realtime_iv.RealTimeIVApp`
 - **Purpose**: Live volatility monitoring with SVI fitting and term structure
 
 ### 2. Backtesting Environment Builder
-- **Script**: `test_backtesting.py`
+- **Script**: `tests/test_backtesting.py`
 - **Module**: `deribit_trading_toolkit.backtesting.environment.BacktestingEnvironment`
 - **Purpose**: Build historical database for backtesting
 
 ### 3. Options Backtesting
-- **Script**: `test_simple_option.py`
+- **Script**: `tests/test_simple_option.py`
 - **Module**: `deribit_trading_toolkit.backtesting.simple_option.SimpleOptionBacktester`
 - **Purpose**: Simulate options trading with PnL decomposition
 
@@ -118,10 +124,12 @@ TradingAlgorithmForDeribit/
 
 ## Configuration
 
-Configuration files are stored in `key/` directory (excluded from git):
-- API credentials
-- Database connection
-- Telegram notifications (optional)
+Configuration is managed through a `.env` file (excluded from git):
+- Copy `.env.example` to `.env` and fill in your credentials
+- All API credentials, database settings, and optional configurations
+- The RSA private key should be placed at the path specified in `DERIBIT_PRIVATE_KEY_PATH` (default: `key/private.pem`)
+
+See `.env.example` for all available configuration options.
 
 ## Database Schema
 

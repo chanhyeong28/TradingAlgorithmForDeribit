@@ -9,10 +9,15 @@ them to check for anomalous ATM slope data and overall curve evolution.
 import asyncio
 import logging
 import json
+import os
+import sys
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
 import matplotlib.pyplot as plt
 import numpy as np
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from deribit_trading_toolkit import SimpleOptionBacktester
 from deribit_trading_toolkit.models.market_data import VolatilityCurve, VolatilityPoint, OptionType

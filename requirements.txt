@@ -32,3 +32,6 @@ scikit-learn>=1.0.0
 
 # Optional: Jupyter support
 ipywidgets>=7.6.0
+
+# Environment variables
+python-dotenv>=1.0.0
